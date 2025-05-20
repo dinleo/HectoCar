@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from models.model_utils import load_model, safe_init
 
 class Hecto(nn.Module):
@@ -41,6 +42,9 @@ class Hecto(nn.Module):
         B, Q, D = hs.shape
         logits_list = []
 
+        all_tokens = []
+        key_padding_masks = []
+
         for b in range(B):
             fg_mask = (pred_logits[b] > self.threshold).any(dim=-1)  # (Q,)
             selected_hs = hs[b][fg_mask]  # (M, D)
@@ -56,16 +60,29 @@ class Hecto(nn.Module):
 
             # Stack region + image features
             tokens = torch.cat([selected_hs, torch.stack(projected_imgs, dim=0)], dim=0)  # (M+4, D)
+            all_tokens.append(tokens)
 
-            # Self-Attention
-            tokens = tokens.unsqueeze(1)  # (L, 1, D)
-            encoded = self.encoder(tokens)  # (L, 1, D)
-            cls_token = encoded.mean(dim=0).squeeze(0)  # (D,)
+        L_max = max([t.shape[0] for t in all_tokens])
+        padded_tokens = []
+        for t in all_tokens:
+            pad_len = L_max - t.shape[0]
+            padded = F.pad(t, (0, 0, 0, pad_len))  # pad rows
+            padded_tokens.append(padded)
 
-            logits = self.classifier(cls_token)
-            logits_list.append(logits)
+        tokens_batch = torch.stack(padded_tokens, dim=1)  # (L_max, B, D)
+        padding_mask = torch.tensor([
+            [False] * t.shape[0] + [True] * (L_max - t.shape[0]) for t in all_tokens
+        ], device=hs.device)  # (B, L_max)
 
-        logits = torch.stack(logits_list, dim=0)  # (B, num_classes)
+        encoded = self.encoder(tokens_batch, src_key_padding_mask=padding_mask)
+        encoded = encoded.transpose(0, 1)
+
+        valid_mask = ~padding_mask  # (B, L_max)
+        lengths = valid_mask.sum(dim=1, keepdim=True).clamp(min=1)  # prevent divide-by-zero
+        masked_encoded = encoded * valid_mask.unsqueeze(-1)  # (B, L_max, D)
+        cls_token = masked_encoded.sum(dim=1) / lengths  # (B, D)
+
+        logits = self.classifier(cls_token)
 
         output = {
             "pred_logits": logits,
