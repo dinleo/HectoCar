@@ -80,7 +80,6 @@ model.\
                     transformer=L(build_transformer)(
                         args=transformer_args
                     ),
-                    mode="stage1",
                     **gdino_args
             ))
     ))
