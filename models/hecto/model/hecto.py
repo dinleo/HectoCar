@@ -8,6 +8,7 @@ class Hecto(nn.Module):
         super().__init__()
         self.device = device
         self.threshold = 0.3
+        self.parts_num = 6
         self.detr_backbone = detr_backbone
 
         # Linear projection for image features to match D
@@ -35,7 +36,7 @@ class Hecto(nn.Module):
             self.detr_backbone.eval()
             detr_output = self.detr_backbone(batched_input)
 
-        pred_logits = detr_output["pred_logits"].sigmoid()  # (B, Q, 128)
+        pred_logits = detr_output["pred_logits"].sigmoid()   # (B, Q, 128)
         hs = detr_output["hs"]                               # (B, Q, D)
         image_features = detr_output["image_feature"]        # list of 4 x [B, C_i, H, W]
 
@@ -46,10 +47,22 @@ class Hecto(nn.Module):
         key_padding_masks = []
 
         for b in range(B):
-            fg_mask = (pred_logits[b] > self.threshold).any(dim=-1)  # (Q,)
-            selected_hs = hs[b][fg_mask]  # (M, D)
-            if selected_hs.shape[0] == 0:
-                selected_hs = hs[b][:1]
+            pred = pred_logits[b]  # (Q, 128)
+            hs_b = hs[b]  # (Q, D)
+            mask = (pred > self.threshold)  # (Q, 128)
+
+            class_hs_list = []
+            for c in range(self.parts_num):
+                cls_mask = mask[:, c]  # (Q,)
+                if cls_mask.sum() == 0:
+                    continue  # 이 클래스에 해당하는 region 없음
+                avg = hs_b[cls_mask].mean(dim=0)  # (D,)
+                class_hs_list.append(avg)
+
+            if len(class_hs_list) == 0:
+                selected_hs = hs_b[:1]
+            else:
+                selected_hs = torch.stack(class_hs_list, dim=0)  # (C′, D)
 
             # Pool and project each image scale
             projected_imgs = []
