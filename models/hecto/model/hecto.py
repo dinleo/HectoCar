@@ -10,7 +10,7 @@ class Hecto(nn.Module):
         super().__init__()
         self.device = device
         self.threshold = 0.2
-        self.num_of_query = 16
+        self.num_of_query = 8
         self.num_of_context = 64
         self.num_of_prompt = 6
         self.detr_backbone = detr_backbone
@@ -94,11 +94,11 @@ class Hecto(nn.Module):
             context_list.append(pooled)
 
         attended = self.encoder(query_tensor, context_list, query_mask)  # (B, max_len, D)
-        attended = attended.masked_fill(query_mask.unsqueeze(-1), 0.0)
-        lengths = (~query_mask).sum(dim=1, keepdim=True).clamp(min=1)
-        pooled = attended.sum(dim=1) / lengths
-
-        logits = self.classifier(pooled)
+        query_logits = self.classifier(attended)  # (B, Q, num_classes)
+        valid_mask = (~query_mask).unsqueeze(-1)  # (B, Q, 1)
+        query_logits = query_logits * valid_mask
+        lengths = valid_mask.sum(dim=1).clamp(min=1)  # (B, 1)
+        logits = query_logits.sum(dim=1) / lengths  # (B, num_classes)
 
         return {
             "pred_logits": logits,
