@@ -13,21 +13,24 @@ class Hecto(nn.Module):
         self.num_of_query = 6
         self.num_of_context = 64
         self.detr_backbone = detr_backbone
+        self.input_dim = 256
+        self.hidden_dim = 512
 
-        self.encoder = HectoEncoder(dim=256, depth=4, heads=8, dropout=0.1)
-        self.img_proj = nn.Linear(256, 256)
+        self.encoder = HectoEncoder(dim=self.hidden_dim, depth=4, heads=8, dropout=0.1)
+        self.query_proj = nn.Linear(self.input_dim, self.hidden_dim)
+        self.img_proj = nn.Linear(self.input_dim, self.hidden_dim)
         self.img_down = nn.Sequential(
-            nn.Conv1d(256, 256, kernel_size=3, stride=2, padding=1),  # downsampling
+            nn.Conv1d(self.hidden_dim, self.hidden_dim, kernel_size=3, stride=2, padding=1),  # downsampling
             nn.GELU()
         )
-        self.img_pool = nn.AdaptiveAvgPool1d(128)
+        self.img_pool = nn.AdaptiveAvgPool1d(self.num_of_context)
 
-        self.learnable_query = nn.Parameter(torch.randn(self.num_of_query, 256))
+        self.learnable_query = nn.Parameter(torch.randn(self.num_of_query, self.hidden_dim))
 
         self.classifier = nn.Sequential(
-            nn.Linear(256, 512),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.ReLU(),
-            nn.Linear(512, num_classes)
+            nn.Linear(self.hidden_dim, num_classes)
         )
 
         self.freeze_backbone()
@@ -62,7 +65,7 @@ class Hecto(nn.Module):
                 selected = hs_b[:1]
             else:
                 selected = torch.stack(class_hs_list, dim=0)
-
+            selected = self.query_proj(selected)
             combined_query = torch.cat([self.learnable_query.to(selected.device), selected], dim=0)
             selected_hs_list.append(combined_query)
             query_padding_mask.append(torch.zeros(combined_query.size(0), dtype=torch.bool, device=hs.device))
