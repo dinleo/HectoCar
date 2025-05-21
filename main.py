@@ -172,6 +172,8 @@ class Trainer(SimpleTrainer):
 def per_epoch(model):
     if hasattr(model, "aqua"):
         model.aqua.region_query_generator.print_gt_matching()
+    if hasattr(model, "print_query_len"):
+        model.hecto.print_query_len()
     upload("")
 
 

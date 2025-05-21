@@ -9,9 +9,10 @@ class Hecto(nn.Module):
     def __init__(self, detr_backbone, device="cuda", num_classes=396):
         super().__init__()
         self.device = device
-        self.threshold = 0.3
-        self.num_of_query = 6
+        self.threshold = 0.2
+        self.num_of_query = 16
         self.num_of_context = 64
+        self.num_of_prompt = 6
         self.detr_backbone = detr_backbone
         self.input_dim = 256
         self.hidden_dim = 512
@@ -33,6 +34,8 @@ class Hecto(nn.Module):
             nn.Linear(self.hidden_dim, num_classes)
         )
 
+        self.query_count = 0
+        self.batch_count = 0
         self.freeze_backbone()
 
     def forward(self, batched_input):
@@ -51,22 +54,22 @@ class Hecto(nn.Module):
         for b in range(B):
             pred = pred_logits[b]
             hs_b = hs[b]
-            mask = (pred > self.threshold)
+            selected_hs = []
+            for c in range(self.num_of_prompt):  # C
+                cls_mask = pred[:, c] > self.threshold  # (Q,)
+                if cls_mask.any():
+                    selected_hs.append(hs_b[cls_mask])  # (N_c, D)
 
-            class_hs_list = []
-            for c in range(self.num_of_query):
-                cls_mask = mask[:, c]
-                if cls_mask.sum() == 0:
-                    continue
-                avg = hs_b[cls_mask].mean(dim=0)
-                class_hs_list.append(avg)
-
-            if len(class_hs_list) == 0:
+            if len(selected_hs) == 0:
                 selected = hs_b[:1]
             else:
-                selected = torch.stack(class_hs_list, dim=0)
+                selected = torch.cat(selected_hs, dim=0)  # (N, D)
             selected = self.query_proj(selected)
+
             combined_query = torch.cat([self.learnable_query.to(selected.device), selected], dim=0)
+            self.query_count += len(combined_query)
+            self.batch_count += 1
+
             selected_hs_list.append(combined_query)
             query_padding_mask.append(torch.zeros(combined_query.size(0), dtype=torch.bool, device=hs.device))
 
@@ -101,6 +104,9 @@ class Hecto(nn.Module):
             "pred_logits": logits,
             "batched_input": batched_input,
         }
+    def print_query_len(self):
+        ave = self.query_count / self.batch_count
+        print("Average query:" , ave)
 
     def freeze_backbone(self):
         for param in self.detr_backbone.parameters():
