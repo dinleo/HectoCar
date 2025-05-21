@@ -128,24 +128,24 @@ class Trainer(SimpleTrainer):
         wrap the optimizer with your custom `zero_grad()` method.
         """
 
-        # if self.amp:
-        #     self.grad_scaler.scale(losses).backward()
-        #     if self.clip_grad_params is not None:
-        #         self.grad_scaler.unscale_(self.optimizer)
-        #         self.clip_grads(self.model.parameters())
-        #     if self.iter % self.batch_size_scale == 0:
-        #         # print(self.iter)
-        #         self.grad_scaler.step(self.optimizer)
-        #         self.grad_scaler.update()
-        #         self.optimizer.zero_grad()
-        # else:
-        #     losses.backward()
-        #     if self.clip_grad_params is not None:
-        #         self.clip_grads(self.model.parameters())
-        #     if self.iter % self.batch_size_scale == 0:
-        #         # print(self.iter)
-        #         self.optimizer.step()
-        #         self.optimizer.zero_grad()
+        if self.amp:
+            self.grad_scaler.scale(losses).backward()
+            if self.clip_grad_params is not None:
+                self.grad_scaler.unscale_(self.optimizer)
+                self.clip_grads(self.model.parameters())
+            if self.iter % self.batch_size_scale == 0:
+                # print(self.iter)
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
+                self.optimizer.zero_grad()
+        else:
+            losses.backward()
+            if self.clip_grad_params is not None:
+                self.clip_grads(self.model.parameters())
+            if self.iter % self.batch_size_scale == 0:
+                # print(self.iter)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
         self._write_metrics(loss_dict, data_time)
 
