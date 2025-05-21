@@ -44,6 +44,7 @@ class Hecto(nn.Module):
             detr_output = self.detr_backbone(batched_input)
 
             pred_logits = detr_output["pred_logits"].sigmoid()   # (B, Q, 128)
+            pred_boxes = detr_output["pred_boxes"]               # (B, Q, 4)
             hs = detr_output["hs"]                               # (B, Q, D)
             image_features = detr_output["image_feature"]        # list of 4 x [B, C, H, W]
 
