@@ -11,12 +11,16 @@ class Hecto(nn.Module):
         self.device = device
         self.threshold = 0.3
         self.num_of_query = 6
-        self.num_of_context = 128
+        self.num_of_context = 64
         self.detr_backbone = detr_backbone
 
         self.encoder = HectoEncoder(dim=256, depth=4, heads=8, dropout=0.1)
         self.img_proj = nn.Linear(256, 256)
-        self.img_pool = nn.AdaptiveAvgPool1d(self.num_of_context)  # reduce to 64 tokens per scale
+        self.img_down = nn.Sequential(
+            nn.Conv1d(256, 256, kernel_size=3, stride=2, padding=1),  # downsampling
+            nn.GELU()
+        )
+        self.img_pool = nn.AdaptiveAvgPool1d(128)
 
         self.learnable_query = nn.Parameter(torch.randn(self.num_of_query, 256))
 
@@ -79,7 +83,8 @@ class Hecto(nn.Module):
             # B, C, H, W = lvl.shape
             tokens = lvl.flatten(2).permute(0, 2, 1)  # (B, H*W, C)
             projected = self.img_proj(tokens).transpose(1, 2)  # (B, D, N)
-            pooled = self.img_pool(projected).transpose(1, 2)  # (B, 64, D)
+            projected_down = self.img_down(projected)
+            pooled = self.img_pool(projected_down).transpose(1, 2)  # (B, 64, D)
             context_list.append(pooled)
 
         attended = self.encoder(query_tensor, context_list, query_mask)  # (B, max_len, D)
