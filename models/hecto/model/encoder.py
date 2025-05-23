@@ -89,7 +89,7 @@ class FeedForward(nn.Module):
         super().__init__()
         self.ffn = nn.Sequential(
             nn.Linear(dim, dim * 4),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(dim * 4, dim)
         )

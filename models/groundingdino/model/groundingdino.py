@@ -304,7 +304,7 @@ class GroundingDINO(nn.Module):
     def forward(self, batched_input, hub=None):
         # prepare targets
         B = len(batched_input)
-        captions = ["car . wheel . headlight . emblem . side mirror . window ."] * B
+        captions = ["wheel . headlight . emblem . side mirror . window ."] * B
         text_output = self.text_backbone(captions, self.device)
         image_output = self.image_backbone_output(batched_input)
 

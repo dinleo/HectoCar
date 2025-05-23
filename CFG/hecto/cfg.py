@@ -5,7 +5,7 @@ ckpt_dir = os.getenv("CKPT", "inputs/ckpt")
 branch_name = os.getenv("BRANCH", "test")
 
 # If set True, Enable fast debugging(batch=1, max_iter=200)
-dev_test = False
+dev_test = True
 
 # Base cfg
 project_name = "hecto" # Cur Subdir
@@ -35,7 +35,7 @@ model.build.args.detr_backbone.args.ckpt_path = f"{ckpt_dir}/gdino.pth"
 
 
 # modify solver
-solver.optimizer.lr = 1
+solver.optimizer.lr = 1e-4
 solver.optimizer.weight_decay = 0.01
 
 solver.lr_scheduler.epochs=epoch
