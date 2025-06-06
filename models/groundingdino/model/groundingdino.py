@@ -358,7 +358,7 @@ class GroundingDINO(nn.Module):
             "pred_logits": output_class[-1],
             "pred_boxes": output_coord_list[-1],
             "hs": hs[-1],
-            "image_feature": image_output[3],
+            "image_output": image_output,
         }
 
 

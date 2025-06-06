@@ -1,16 +1,3 @@
-# ------------------------------------------------------------------------
-# Grounding DINO
-# url: https://github.com/IDEA-Research/GroundingDINO
-# Copyright (c) 2023 IDEA. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-# -*- coding: utf-8 -*-
-# @Author: Yihao Chen
-# @Date:   2021-08-16 16:03:17
-# @Last Modified by:   Shilong Liu
-# @Last Modified time: 2022-01-23 15:26
-# modified from mmcv
-
 import torch
 from collections import OrderedDict
 from detectron2.config import LazyCall, instantiate
@@ -59,7 +46,7 @@ def safe_init(cls, args: dict):
     return cls(**filtered_args)
 
 
-def check_frozen(model, max_depth=1):
+def check_frozen(model, max_depth=5):
     def collect_status(module, name_path=""):
         own_params = list(module.named_parameters(recurse=False))
 
@@ -91,40 +78,41 @@ def check_frozen(model, max_depth=1):
 
         return node
 
+    def print_tree(tree, depth=0, max_depth=1, prefix=""):
+        if depth > max_depth:
+            return
+        if depth == 0:
+            module_width = 40
+            print("-" * (module_width + 34))
+            print(f"{'Module'.ljust(module_width)} | {'Trainable':>9} | {'Frozen':>6} |   Size  ")
+            print("-" * (module_width + 34))
+
+        module_width = 40
+        total = len(tree)
+        for idx, (module_name, node) in enumerate(tree.items()):
+            trainable = node['Trainable Params']
+            frozen = node['Frozen Params']
+            total_params = format_params(node['Total Params'])
+
+            if idx == total - 1:
+                branch = "└── "
+            else:
+                branch = "├── "
+
+            name_field = prefix + branch + module_name
+            print(f"{name_field.ljust(module_width)} | {trainable:9} | {frozen:6} | {str(total_params).rjust(9)}")
+
+            if 'children' in node and depth < max_depth:
+                if idx == total - 1:
+                    extension = "    "
+                else:
+                    extension = "│   "
+                print_tree(node['children'], depth=depth + 1, max_depth=max_depth, prefix=prefix + extension)
+
     tree = {'__root__': collect_status(model)}
     print_tree(tree, max_depth=max_depth)
     return tree
 
-def print_tree(tree, depth=0, max_depth=1, prefix=""):
-    if depth > max_depth:
-        return
-    if depth == 0:
-        module_width = 40
-        print("-" * (module_width + 34))
-        print(f"{'Module'.ljust(module_width)} | {'Trainable':>9} | {'Frozen':>6} |   Size  ")
-        print("-" * (module_width + 34))
-
-    module_width = 40
-    total = len(tree)
-    for idx, (module_name, node) in enumerate(tree.items()):
-        trainable = node['Trainable Params']
-        frozen = node['Frozen Params']
-        total_params = format_params(node['Total Params'])
-
-        if idx == total - 1:
-            branch = "└── "
-        else:
-            branch = "├── "
-
-        name_field = prefix + branch + module_name
-        print(f"{name_field.ljust(module_width)} | {trainable:9} | {frozen:6} | {str(total_params).rjust(9)}")
-
-        if 'children' in node and depth < max_depth:
-            if idx == total - 1:
-                extension = "    "
-            else:
-                extension = "│   "
-            print_tree(node['children'], depth=depth+1, max_depth=max_depth, prefix=prefix + extension)
 
 def format_params(num):
     if num >= 1_000_000_000:
@@ -136,7 +124,79 @@ def format_params(num):
     else:
         return str(num)
 
-def visualize(pred_logit=None, pred_boxes=None, caption=None, image=None, threshold=0.1, gt=None, is_norm=True, is_logit=True, is_cxcy=True, save_name="result"):
+
+def check_grad(model):
+    def collect(module):
+        tree = {
+            'Param Count': 0,
+            'children': {},
+            'Param Norm': 0.0,
+            'Grad Norm': 0.0,
+        }
+        for name, param in module.named_parameters(recurse=False):
+            if param.grad is not None:
+                try:
+                    param_norm = param.data.norm(dim=-1).mean().item()
+                    grad_norm = param.grad.norm(dim=-1).mean().item()
+                except RuntimeError:
+                    # fallback
+                    param_norm = param.data.norm().item()
+                    grad_norm = param.grad.norm().item()
+                if param_norm < 1e-4:
+                    ratio = 0
+                else:
+                    ratio = grad_norm / param_norm
+                count = param.numel()
+                tree['children'][name] = {
+                    'Param Count': count,
+                    'Param Norm': param_norm,
+                    'Grad Norm': grad_norm,
+                    'Ratio': ratio,
+                    'is_leaf': True
+                }
+                tree['Param Count'] += count
+                tree['Param Norm'] += param_norm
+                tree['Grad Norm'] += grad_norm
+
+        for child_name, child_module in module.named_children():
+            child_tree = collect(child_module)
+            if child_tree['Param Count'] > 0:
+                tree['children'][child_name] = child_tree
+                tree['Param Count'] += child_tree['Param Count']
+                tree['Param Norm'] += child_tree['Param Norm']
+                tree['Grad Norm'] += child_tree['Grad Norm']
+        return tree
+
+    def print_node(name, node, prefix="", is_last=True):
+        branch = "└── " if is_last else "├── "
+        extension = "    " if is_last else "│   "
+        full_name = prefix + branch + name
+
+        param_count = node.get("Param Count", 0)
+
+        if node.get("is_leaf", False):
+            param_norm = node.get("Param Norm", 0.0)
+            grad_norm = node.get("Grad Norm", 0.0)
+            ratio = node.get("Ratio", 0.0)
+            print(f"{full_name:<50} | {format_params(param_count):>8} | {param_norm:10.4f} | {grad_norm:10.4f} | {ratio:8.4f}")
+        else:
+            print(f"{full_name:<50} | {format_params(param_count):>8} | {'':>10} | {'':>10} | {'':>8}")
+
+        children = list(node.get("children", {}).items())
+        for i, (child_name, child_node) in enumerate(children):
+            print_node(child_name, child_node, prefix + extension, i == len(children) - 1)
+
+    # Header
+    print("-" * 100)
+    print(f"{'Parameter':<50} | {'Param#':>8} | {'‖θ‖':>10} | {'‖∇L‖':>10} | {'ratio':>8}")
+    print("-" * 100)
+
+    tree = collect(model)
+    print_node("__root__", tree)
+
+
+
+def visualize(mode, input, image=None, batch=0, idx =-1, threshold=0.1, labels=None, vocab=None, caption=None, save_name=None):
     """
     Args:
         pred_logit: (N, C_prompt) logits before sigmoid
@@ -145,57 +205,89 @@ def visualize(pred_logit=None, pred_boxes=None, caption=None, image=None, thresh
         image: torch Tensor [3, H, W], pixel image
         threshold: detection confidence threshold
     """
-
-    if gt is None:
-        # 1. Prepare
-        cat_names = [c.strip() for c in caption.strip(" .").split(".") if c.strip()]
+    is_logit = True
+    is_cxcy = True
+    is_norm = True
+    save_name = mode if save_name is None else save_name
+    if mode == "gt":
+        input = input[batch]
+        if not hasattr(input, "gt_classes"):
+            gt = input["instances"]
+            image = input["image"]
+        else:
+            gt = input
+        class_index = gt.gt_classes
+        pred_boxes = gt.gt_boxes.tensor
+        if hasattr(gt, "gt_names"):
+            labels = gt.gt_names
         image = image.permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
         h, w, _ = image.shape
+        class_score = class_index + 100
+        save_name = "gt"
+    else:
+        if mode == "nms":
+            pred_logits = input['nms_prob'][batch][:idx]
+            pred_boxes = input['nms_boxes'][batch][:idx]
+            is_logit = False
+            is_cxcy = False
+        elif mode == "model":
+            pred_logits = input['pred_logits'][batch][:idx]
+            pred_boxes = input['pred_boxes'][batch][:idx]
+            K = min(len(pred_logits),len(pred_boxes))
+            pred_logits = pred_logits[:K]
+            pred_boxes = pred_boxes[:K]
+            is_logit = False
+        else:
+            pred_logits = input['pred_logits'][batch][:idx]
+            pred_boxes = input['pred_boxes'][batch][:idx]
+
+        # 1. Prepare Image
+        image = image.permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
+        h, w, _ = image.shape
+
         # 2. Process predictions
         if is_logit:
-            pred_logit=pred_logit.sigmoid()
-        if pred_logit.dim() == 1:
-            pred_logit.unsqueeze_(1)
-        pred_logit = pred_logit.detach().cpu()  # [N, C]
-        pred_boxes = pred_boxes.detach().cpu()            # [N, 4], cxcywh (0~1)
-        scores = pred_logit.max(dim=1).values    # [N]
+            pred_logits = pred_logits.sigmoid()
+        if pred_logits.dim() == 1:
+            pred_logits.unsqueeze_(1)
+        pred_logits = pred_logits.detach().cpu()  # [N, C]
+        pred_boxes = pred_boxes.detach().cpu()  # [N, 4], cxcywh (0~1)
+
+        class_score, class_index = pred_logits.max(dim=1) # [N]
 
         # 3. Filter by confidence
-        mask = scores > threshold
-        pred_logit = pred_logit[mask]        # [M, C]
-        pred_boxes = pred_boxes[mask]        # [M, 4]
-        scores = scores[mask]                # [M]
-
-        # 4. Class index
-        pred_class = pred_logit.argmax(dim=1).numpy()
-
+        mask = class_score > threshold
+        class_index = class_index[mask]
+        class_score = class_score[mask]
+        pred_boxes = pred_boxes[mask]
+        if labels:
+            labels = [l for l, m in zip(labels, mask.tolist()) if m]
         if pred_boxes.shape[0] == 0:
             print("No boxes passed threshold.")
-            return image  # return unchanged
+            return None
 
-        # 5. Box conversion and scaling
+        # 4. Box conversion and scaling
         if is_cxcy:
             pred_boxes = box_convert(pred_boxes, in_fmt="cxcywh", out_fmt="xyxy")  # [M, 4]
         if is_norm:
             pred_boxes *= torch.tensor([w, h, w, h])  # scale to absolute coords
-    else:
-        pred_class = gt["instances"].gt_classes
-        pred_boxes = gt["instances"].gt_boxes.tensor
-        cat_names = [c.strip() for c in gt["captions"].strip(".").split(".") if c.strip()]
-        image = gt["image"].permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
-        h, w, _ = image.shape
-        scores = pred_class + 100
-        save_name = "gt"
     pred_boxes = pred_boxes.numpy()
+    if not labels:
+        labels = []
+        if not vocab:
+            if not caption:
+                vocab = coco_name_list
+            else:
+                vocab = [c.strip() for c in caption.strip(" .").split(".") if c.strip()]
+        for i, s in zip(class_index, class_score):
+            if s >= 100:
+                labels.append("GT-" + vocab[i])
+            else:
+                labels.append(vocab[i])
 
     # 6. Prepare visualization
-    phrases = [cat_names[c] for c in pred_class]
-    detections = sv.Detections(xyxy=pred_boxes, class_id=pred_class)
-
-    labels = [
-        (f"GT-{coco_name_list[int(score-100)]}" if score >= 100 else f"{phrase} {score:.2f}")
-        for phrase, score in zip(phrases, scores.numpy())
-    ]
+    class_index = class_index.detach().cpu().numpy()
+    detections = sv.Detections(xyxy=pred_boxes, class_id=class_index)
 
     box_annotator = sv.BoundingBoxAnnotator()
     label_annotator = sv.LabelAnnotator()
@@ -210,12 +302,10 @@ def visualize(pred_logit=None, pred_boxes=None, caption=None, image=None, thresh
         labels=labels
     )
 
-    num_gt = (scores >= 100).sum().item()
-    print(f"predict {len(pred_class)} instances (GT: {num_gt})")
+    num_gt = (class_score >= 100).sum().item()
+    print(f"predict {len(class_index)} instances (GT: {num_gt})")
     cv2.imwrite(f"outputs/{save_name}.jpg", annotated)
-    # cv2.imshow("Prediction", annotated)
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
+
     return annotated
 
 def visualize_pca(features: torch.Tensor, gt_labels: list, title="PCA by Class (Batched)"):

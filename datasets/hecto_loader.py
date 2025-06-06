@@ -6,21 +6,21 @@ import os
 import torch
 
 
-class GDinoDataset(datasets.ImageFolder):
+class HectoDataset(datasets.ImageFolder):
     def __getitem__(self, index):
         image, label = super().__getitem__(index)
         path, _ = self.samples[index]
         return image, label, path
 
 
-class GDinoDataloader:
+class HectoDataloader:
     def __init__(self, image_root, batch_size, num_workers, is_train):
         self.batch_size = batch_size
         self.is_train = is_train
         self.num_workers = num_workers
 
         if self.is_train:
-            self.dataset = GDinoDataset(
+            self.dataset = HectoDataset(
                 root=image_root,
                 transform=None  # 정규화 없이 원본 유지
             )
@@ -70,4 +70,4 @@ class GDinoDataloader:
 
 
 def build_dataloader(image_root, batch_size, num_workers, is_train):
-    return GDinoDataloader(image_root, batch_size, num_workers, is_train)
+    return HectoDataloader(image_root, batch_size, num_workers, is_train)

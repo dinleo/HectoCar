@@ -3,125 +3,176 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.model_utils import load_model, safe_init, visualize
+from models.hecto.model.base_model import BaseModel, BertConfigW
 from models.hecto.model.encoder import HectoEncoder
 
 class Hecto(nn.Module):
-    def __init__(self, detr_backbone, device="cuda", num_classes=396):
+    def __init__(self,
+                 detr_backbone,
+                 region_size=256,
+                 image_size=256,
+                 image_scale=4,
+                 query_size=768,
+                 context_size=768,
+                 num_query_token=16,
+                 num_context_token=32,
+                 num_of_prompt=5,
+                 num_classes=396,
+                 device="cuda",
+                 ):
         super().__init__()
         self.device = device
         self.detr_backbone = detr_backbone
 
-        # encoder
-        self.input_dim = 256
-        self.hidden_dim = 512
-        self.encoder = HectoEncoder(dim=self.hidden_dim, depth=4, heads=8, dropout=0.1)
+        # Backbone
+        self.region_size = region_size
+        self.image_size = image_size
+        self.image_scale = image_scale
+
+        # Encoder
+        self.query_size = query_size
+        self.context_size = context_size
+        self.num_query_token = num_query_token
+        self.num_context_token = num_context_token
+        self.num_hidden_layers = image_scale * 2
+        # ex [(16, 16), (8, 8), (4, 4), (2, 2)]
+        self.pool_sizes = [(max(1, self.num_context_token // (2 ** i)),) * 2 for i in range(self.image_scale)]
+        self.encoder = self.init_encoder()
 
         # query
-        self.num_of_query = 4
-        self.num_of_prompt = 6
+        self.num_of_prompt = num_of_prompt
+        self.num_of_query = num_of_prompt + 1
+        self.learnable_query = nn.Parameter(torch.randn(self.num_of_query, self.query_size))
         self.threshold = 0.2
-        self.query_proj = nn.Linear(self.input_dim, self.hidden_dim)
-        self.query_norm = nn.LayerNorm(self.hidden_dim)
-        self.learnable_query = nn.Parameter(torch.randn(self.num_of_query, self.hidden_dim))
-        nn.init.normal_(self.learnable_query, std=1.0)
+        self.query_proj = nn.Linear(self.region_size, self.query_size)
+        self.query_norm = nn.LayerNorm(self.query_size)
 
-        # context
-        self.num_of_context = 64
-        self.scale_of_context = 4
-        self.context_proj = nn.Linear(self.input_dim, self.hidden_dim)
-        self.context_down = nn.Sequential(
-            nn.Conv1d(self.hidden_dim, self.hidden_dim, kernel_size=3, stride=2, padding=1),  # downsampling
-            nn.GELU()
-        )
-        self.context_pool = nn.AdaptiveAvgPool1d(self.num_of_context)
-        self.context_norm = nn.ModuleList([
-            nn.LayerNorm(self.hidden_dim) for _ in range(self.scale_of_context)
+        # Input context
+        self.context_projection = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(image_size, context_size, kernel_size=1),
+            )
+            for _ in range(image_scale)
         ])
-
+        self.context_tokens_ln = nn.ParameterList([nn.LayerNorm(context_size) for _ in range(image_scale)])
 
         # classifier
         self.classifier = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Linear(self.query_size, self.query_size),
             nn.ReLU(),
-            nn.Linear(self.hidden_dim, num_classes)
+            nn.Linear(self.query_size, num_classes)
         )
-        nn.init.normal_(self.classifier[-1].weight, std=0.1)
 
         self.query_count = 0
         self.batch_count = 0
         self.freeze_backbone()
 
     def forward(self, batched_input):
-        with torch.no_grad():
-            self.detr_backbone.eval()
-            detr_output = self.detr_backbone(batched_input)
+        # 1. Backbone
 
-            pred_logits = detr_output["pred_logits"].sigmoid()   # (B, Q, 128)
-            pred_boxes = detr_output["pred_boxes"]               # (B, Q, 4)
-            hs = detr_output["hs"]                               # (B, Q, D)
-            image_features = detr_output["image_feature"]        # list of 4 x [B, C, H, W]
+        self.detr_backbone.eval()
+        detr_output = self.detr_backbone(batched_input)
 
+        pred_logits = detr_output["pred_logits"]             # (B, Q, 128)
+        pred_boxes = detr_output["pred_boxes"]               # (B, Q, 4)
+        hs = detr_output["hs"]                               # (B, Q, D)
+        image_output = detr_output["image_output"]        # list of 4 x [B, C, H, W]
+            # visualize("model", detr_output, batched_input[0]["image"], caption="wheel . headlight . emblem . side mirror . window .")
+        # 2. Make Query Input
         B, Q, D = hs.shape
-        selected_hs_list = []
-        query_padding_mask = []
-
+        query_list = []
         for b in range(B):
-            pred_l = pred_logits[b]
-            pred_b = pred_boxes[b]
+            logit_b = pred_logits[b].sigmoid()
+            boxes_b = pred_boxes[b]
             hs_b = hs[b]
-
-            max_pred_l = pred_l.max(dim=-1)[0]
-            mask = max_pred_l > self.threshold
+            mask = logit_b.max(dim=-1)[0] > self.threshold
 
             if mask.sum() == 0:
-                selected = self.query_proj(hs_b[:1])  # fallback
+                prompt_hs = torch.zeros(self.num_of_prompt, self.query_size, device=hs.device)
             else:
-                hs_sel = hs_b[mask]  # (N, D)
-                box_sel = pred_b[mask]  # (N, 4)
-                box_pos = self.box_positional_encoding(box_sel)  # (N, D)
-                selected = self.query_proj(hs_sel) + box_pos  # (N, D)
+                hs_sel = hs_b[mask]        # (N, D)
+                logit_sel = logit_b[mask]  # (N, 128)
+                box_sel = boxes_b[mask]    # (N, 4)
 
-            # visualize(pred_l[mask], pred_b[mask], "car . wheel . headlight . emblem . side mirror . window .", image=batched_input[0]['image'],is_logit=False,)
+                prompt_hs = []
+                for i in range(self.num_of_prompt):  # e.g., wheel, headlight, ...
+                    logits_i = logit_sel[:, i]  # (N,)
+                    mask_c = logits_i > self.threshold
 
-            combined_query = torch.cat([self.learnable_query.to(selected.device), selected], dim=0)
-            self.query_count += len(combined_query)
-            self.batch_count += 1
+                    if mask_c.sum() == 0:
+                        pooled = torch.zeros(self.region_size, device=hs.device)
+                    else:
+                        pooled = hs_sel[mask_c].mean(dim=0)  # (D,)
+                    prompt_hs.append(pooled)
 
-            selected_hs_list.append(combined_query)
-            query_padding_mask.append(torch.zeros(combined_query.size(0), dtype=torch.bool, device=hs.device))
+                prompt_hs = torch.stack(prompt_hs, dim=0)  # (num_prompt, hidden_dim)
+                prompt_hs = self.query_proj(prompt_hs)
 
-        max_len = max(t.size(0) for t in selected_hs_list)
-        padded_query = []
-        padded_mask = []
-        for q, m in zip(selected_hs_list, query_padding_mask):
-            pad_len = max_len - q.size(0)
-            padded_query.append(F.pad(q, (0, 0, 0, pad_len)))
-            padded_mask.append(F.pad(m, (0, pad_len), value=True))
+            prompt_query = self.learnable_query[1:] + prompt_hs  # (num_prompt, hidden)
+            cls_query = self.learnable_query[0].unsqueeze(0)   # (1, hidden)
+            query_b = torch.cat([cls_query, prompt_query], dim=0)  # (num_prompt+1, hidden)
+            query_list.append(query_b)
 
-        query_tensor = torch.stack(padded_query, dim=0)  # (B, max_len, D)
-        query_tensor = self.query_norm(query_tensor)
-        query_mask = torch.stack(padded_mask, dim=0)     # (B, max_len)
+        query_tokens = torch.stack(query_list, dim=0)  # (B, max_len, D)
+        query_tokens = self.query_norm(query_tokens)
 
-        context_list = []
-        for scale, feat in enumerate(image_features):
-            # B, C, H, W = lvl.shape
-            tokens = feat.flatten(2).permute(0, 2, 1)  # (B, H*W, C)
-            projected = self.context_proj(tokens).transpose(1, 2)  # (B, D, N)
-            projected_down = self.context_down(projected)
-            pooled = self.context_pool(projected_down).transpose(1, 2)  # (B, 64, D)
-            pooled = self.context_norm[scale](pooled)
-            context_list.append(pooled)
+        # Make Context Input
+        _, _, ms_pos, ms_features, ms_mask = image_output
+        ms_context_tokens = []
+        for s in range(len(ms_features)):
+            feat = ms_features[s]  # (B, C, H, W)
+            pos = ms_pos[s]  # (B, C, H, W)
+            mask = ms_mask[s]  # (B, H, W), True for pad
 
-        attended = self.encoder(query_tensor, context_list, query_mask)  # (B, max_len, D)
+            # 1. mask → float form (0 = keep, 1 = pad)
+            mask_f = mask.unsqueeze(1).float()  # (B, 1, H, W)
 
-        learnable_attended = attended[:, :self.num_of_query]  # (B, 4, D)
-        query_logits = self.classifier(learnable_attended)  # (B, 4, num_classes)
-        logits = query_logits.mean(dim=1)  # (B, num_classes)
+            # 2. mask-out padded region
+            feat_with_pos = feat + pos
+            feat_with_pos = feat_with_pos.masked_fill(mask_f.bool(), 0.0)
+
+            # 3. projection
+            ctx = self.context_projection[s](feat_with_pos)  # (B, D, H, W)
+
+            # 4. pooling
+            pooled = F.adaptive_avg_pool2d(ctx, output_size=self.pool_sizes[s])  # (B, D, h, w)
+            mask_pooled = F.adaptive_avg_pool2d(1.0 - mask_f, output_size=self.pool_sizes[s])  # (B, 1, h, w)
+            mask_pooled = mask_pooled.clamp(min=1e-6)  # divide-by-zero
+
+            pooled = pooled / mask_pooled
+
+            # 6. flatten & LN
+            tokens = pooled.flatten(2).transpose(1, 2).contiguous()  # (B, T, D)
+            tokens = self.context_tokens_ln[s](tokens)
+            ms_context_tokens.append(tokens)
+
+        # Encoder
+        encoder_output = self.encoder(
+            query_tokens=query_tokens,
+            ms_context_tokens=ms_context_tokens
+        )
+
+        last_hidden_state = encoder_output['last_hidden_state']  # (B, Q, D)
+        cls_logit = last_hidden_state[:, 0]       # (B, D)
+        prompt_logit = last_hidden_state[:, 1:]   # (B, 5, D)
+        prompt_logit = prompt_logit.mean(dim=1)
+        logits = self.classifier(cls_logit + prompt_logit)  # (B, num_classes)
 
         return {
             "pred_logits": logits,
             "batched_input": batched_input,
         }
+
+    def init_encoder(self):
+        encoder_config = BertConfigW()
+        encoder_config.region_size = self.query_size
+        encoder_config.query_size = self.query_size
+        encoder_config.context_size = self.context_size
+        encoder_config.num_context_token = self.num_context_token
+        encoder_config.num_hidden_layers = self.num_hidden_layers
+
+        return HectoEncoder(encoder_config)
+
     def print_query_len(self):
         ave = self.query_count / self.batch_count
         print("Average query:" , ave)
@@ -136,8 +187,8 @@ class Hecto(nn.Module):
         boxes: (N, 4) in normalized format [cx, cy, w, h]
         returns: (N, dim)
         """
-        scales = torch.arange(self.hidden_dim // 8, device=boxes.device).float()
-        scales = 10000 ** (2 * (scales // 2) / (self.hidden_dim // 4))
+        scales = torch.arange(self.query_size // 8, device=boxes.device).float()
+        scales = 10000 ** (2 * (scales // 2) / (self.query_size // 4))
 
         encodings = []
         for i in range(4):

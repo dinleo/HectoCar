@@ -14,9 +14,11 @@ in the config file and implement a new train_net.py to handle them.
 """
 import logging
 import os
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import sys
 import time
-import torch
 import json
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
@@ -31,13 +33,13 @@ from detectron2.engine.defaults import create_ddp_model
 from detectron2.utils import comm
 from detectron2.utils.file_io import PathManager
 from detectron2.utils.events import (
-    CommonMetricPrinter, 
-    JSONWriter, 
+    CommonMetricPrinter,
+    JSONWriter,
     TensorboardXWriter
 )
 from detectron2.checkpoint import DetectionCheckpointer
 
-from models.model_utils import check_frozen
+from models.model_utils import *
 from solver.optimizer import ema
 from CFG.cfg_utils import default_setup_detectron2, clean_files
 from hf_up import upload
@@ -45,10 +47,13 @@ from hf_up import upload
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 
 import warnings
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
-warnings.filterwarnings(action="ignore", message="A parameter name that contains `beta` will be renamed internally to `bias`. Please use a different name to suppress this warning.")
-warnings.filterwarnings(action="ignore", message="A parameter name that contains `gamma` will be renamed internally to `weight`. Please use a different name to suppress this warning.")
+warnings.filterwarnings(action="ignore",
+                        message="A parameter name that contains `beta` will be renamed internally to `bias`. Please use a different name to suppress this warning.")
+warnings.filterwarnings(action="ignore",
+                        message="A parameter name that contains `gamma` will be renamed internally to `weight`. Please use a different name to suppress this warning.")
 
 
 class Trainer(SimpleTrainer):
@@ -57,14 +62,14 @@ class Trainer(SimpleTrainer):
     """
 
     def __init__(
-        self,
-        model,
-        criterion,
-        dataloader,
-        optimizer,
-        runner,
-        grad_scaler=None,
-        batch_size_scale=1,
+            self,
+            model,
+            criterion,
+            dataloader,
+            optimizer,
+            runner,
+            grad_scaler=None,
+            batch_size_scale=1,
     ):
         super().__init__(model=model, data_loader=dataloader, optimizer=optimizer)
 
@@ -87,7 +92,7 @@ class Trainer(SimpleTrainer):
 
         # gradient clip hyper-params
         self.clip_grad_params = self.runner.clip_grad.params if self.runner.clip_grad.enabled else None
-        
+
         # batch_size_scale
         self.batch_size_scale = batch_size_scale
 
@@ -103,7 +108,7 @@ class Trainer(SimpleTrainer):
         from torch.cuda.amp import autocast
 
         epoch = self.iter // self.iter_per_epoch
-        progress = epoch/max((self.max_epoch-1),1)
+        progress = epoch / max((self.max_epoch - 1), 1)
         start = time.perf_counter()
         """
         If you want to do something with the data, you can wrap the dataloader.
@@ -116,7 +121,11 @@ class Trainer(SimpleTrainer):
         """
         with autocast(enabled=self.amp):
             outputs = self.model(inputs)
-            loss_dict = self.criterion(outputs, progress)
+            if outputs is None:
+                print(f"Skip {self.iter} due to Empty box")
+                return None
+            outputs["progress"] = progress
+            loss_dict = self.criterion(outputs)
             if isinstance(loss_dict, torch.Tensor):
                 losses = loss_dict
                 loss_dict = {"total_loss": loss_dict}
@@ -127,6 +136,10 @@ class Trainer(SimpleTrainer):
         If you need to accumulate gradients or do something similar, you can
         wrap the optimizer with your custom `zero_grad()` method.
         """
+
+        if not losses.requires_grad or losses.grad_fn is None:
+            print("[Warning] Loss tensor is not differentiable!")
+            return None
 
         if self.amp:
             self.grad_scaler.scale(losses).backward()
@@ -170,10 +183,8 @@ class Trainer(SimpleTrainer):
 
 
 def per_epoch(model):
-    if hasattr(model, "aqua"):
-        model.aqua.region_query_generator.print_gt_matching()
-    if hasattr(model, "print_query_len"):
-        model.hecto.print_query_len()
+    if hasattr(model, "print"):
+        model.print()
     upload("")
 
 
@@ -184,6 +195,9 @@ def do_test(cfg, model, eval_only=False):
         test_loader = instantiate(cfg.dataloader.test_sub)
         cfg.solver.evaluator.dataset_name = "test_sub"
     evaluator = instantiate(cfg.solver.evaluator)
+    model.eval()
+    if hasattr(model, "prepare"):
+        model.prepare()
 
     if cfg.runner.model_ema.enabled:
         logger.info("Run evaluation with EMA.")
@@ -198,6 +212,8 @@ def do_test(cfg, model, eval_only=False):
             f.flush()
         if not cfg.runner.dev_test:
             upload("")
+        if hasattr(model, "print"):
+            model.print()
     clean_files(cfg.runner.output_dir)
     return ret
 
@@ -230,27 +246,27 @@ def do_train(cfg):
     # instantiate model
     model = instantiate(cfg.model.build)
     model.to(cfg.runner.device)
-    # for name, param in model.named_parameters():
-    #     if "bert" in name:
-    #         param.requires_grad = False
+    if hasattr(model, "prepare"):
+        model.prepare()
+        model.to(cfg.runner.device)
 
     # instantiate criterion
     criterion = instantiate(cfg.solver.criterion)
     criterion.to(cfg.runner.device)
 
-    # instantiate optimizer
-    cfg.solver.optimizer.params.model = model
-    optim = instantiate(cfg.solver.optimizer)
-    lr_scheduler = instantiate(cfg.solver.lr_scheduler)
-
     # build training loader
     train_loader = instantiate(cfg.dataloader.train)
-    
+
     # create ddp model
     model = create_ddp_model(model, **cfg.runner.ddp)
 
     # build model ema
     ema.may_build_model_ema(cfg.runner, model)
+
+    # instantiate optimizer
+    cfg.solver.optimizer.params.model = model
+    optim = instantiate(cfg.solver.optimizer)
+    lr_scheduler = instantiate(cfg.solver.lr_scheduler)
 
     trainer = Trainer(
         model=model,
@@ -259,7 +275,7 @@ def do_train(cfg):
         optimizer=optim,
         runner=cfg.runner
     )
-    
+
     checkpointer = DetectionCheckpointer(
         model,
         f"{cfg.runner.output_dir}",
@@ -312,9 +328,9 @@ def main(args):
 
     # Enable fast debugging by running several iterations to check for any bugs.
     if cfg.runner.dev_test:
-        cfg.dataloader.train.batch_size = 2
+        cfg.dataloader.train.batch_size = 4
         cfg.dataloader.train.num_workers = 1
-        cfg.runner.iter_per_epoch = 100
+        cfg.runner.iter_per_epoch = 50
         cfg.runner.epoch = 2
         cfg.runner.log_period = 1
 
@@ -322,7 +338,7 @@ def main(args):
         model = instantiate(cfg.model.build)
         model.to(cfg.runner.device)
         model = create_ddp_model(model)
-        
+
         # using ema for evaluation
         ema.may_build_model_ema(cfg.runner, model)
         DetectionCheckpointer(model, **ema.may_get_ema_checkpointer(cfg.runner, model)).load(cfg.runner.last_ckpt)

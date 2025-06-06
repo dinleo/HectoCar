@@ -1,7 +1,7 @@
 from omegaconf import OmegaConf
 
 from detectron2.config import LazyCall as L
-from datasets.gdino_loader import build_dataloader
+from datasets.hecto_loader import build_dataloader
 
 dataloader = OmegaConf.create()
 dataloader.train = L(build_dataloader)(

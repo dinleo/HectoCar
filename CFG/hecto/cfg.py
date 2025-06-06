@@ -4,15 +4,16 @@ data_dir = os.getenv("DATA", "inputs/data")
 ckpt_dir = os.getenv("CKPT", "inputs/ckpt")
 branch_name = os.getenv("BRANCH", "test")
 
-# If set True, Enable fast debugging(batch=1, max_iter=200)
-dev_test = True
+# Mode
+dev_test = False # If set True, Enable fast debugging(batch=1, max_iter=200)
+eval_only = False
 
 # Base cfg
 project_name = "hecto" # Cur Subdir
 iter_per_epoch = 4000
 epoch = 5
-batch = 6
-eval_sample = 1000 # If set -1, evaluate all testdata
+batch = 10
+eval_sample = 100 # If set -1, evaluate all testdata
 
 
 # CFG Instance
@@ -35,12 +36,12 @@ model.build.args.detr_backbone.args.ckpt_path = f"{ckpt_dir}/gdino.pth"
 
 
 # modify solver
-solver.optimizer.lr = 1e-4
-solver.optimizer.weight_decay = 0.01
+solver.optimizer.lr = 1e-3
+solver.optimizer.weight_decay = 0.05
 
 solver.lr_scheduler.epochs=epoch
 solver.lr_scheduler.decay_epochs=epoch//2
-solver.lr_scheduler.warmup_epochs = 1
+solver.lr_scheduler.warmup_epochs = 0
 solver.lr_scheduler.base_steps=iter_per_epoch
 
 
@@ -58,7 +59,7 @@ runner.last_ckpt = ""
 
 # eval
 runner.do_eval = False
-runner.eval_only = False
+runner.eval_only = eval_only
 runner.eval_sample = eval_sample
 
 # logging config
