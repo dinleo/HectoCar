@@ -36,7 +36,7 @@ model.build.args.detr_backbone.args.ckpt_path = f"{ckpt_dir}/gdino.pth"
 
 
 # modify solver
-solver.optimizer.lr = 1e-3
+solver.optimizer.lr = 5e-5
 solver.optimizer.weight_decay = 0.05
 
 solver.lr_scheduler.epochs=epoch
