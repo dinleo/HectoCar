@@ -3,7 +3,7 @@
 export CUDA_HOME=/usr/local/cuda
 pip install wandb huggingface_hub python-dotenv
 pip install 'git+https://github.com/facebookresearch/detectron2.git'
-pip install -e .
+pip install -e . --no-deps
 
 mkdir -p outputs
 mkdir -p inputs/ckpt
