@@ -26,8 +26,8 @@ solver = get_config(f"{project_name}/solver_.py").solver
 # modify dataloader
 dataloader.train.num_workers = 8
 dataloader.train.batch_size = batch
-dataloader.train.image_root = f"{data_dir}/train"
-dataloader.test.image_root = f"{data_dir}/test"
+dataloader.train.image_root = f"{data_dir}/hectocar/train"
+dataloader.test.image_root = f"{data_dir}/hectocar/test"
 
 
 # modify model
