@@ -40,7 +40,7 @@ from detectron2.modeling import detector_postprocess
 from detectron2.structures import ImageList
 
 from models.model_utils import safe_init, load_model, visualize
-from models.post_process_logit import PostProcessLogit
+from models.caption_processor import CaptionProcessor
 
 
 class GroundingDINO(nn.Module):
@@ -90,6 +90,8 @@ class GroundingDINO(nn.Module):
         self.nheads = nheads
         self.max_text_len = max_text_len
         self.sub_sentence_present = sub_sentence_present
+
+        self.captions = "wheel . headlight . emblem . side mirror . window ."
 
         # setting query dim
         self.query_dim = query_dim
@@ -205,7 +207,7 @@ class GroundingDINO(nn.Module):
         self.pixel_std = pixel_std
 
         # coco
-        self.post_logit = PostProcessLogit(self.tokenizer)
+        self.post_logit = CaptionProcessor(self.tokenizer)
 
     def _reset_parameters(self):
         # init input_proj
@@ -304,7 +306,7 @@ class GroundingDINO(nn.Module):
     def forward(self, batched_input, hub=None):
         # prepare targets
         B = len(batched_input)
-        captions = ["wheel . headlight . emblem . side mirror . window ."] * B
+        captions = [self.captions] * B
         text_output = self.text_backbone(captions, self.device)
         image_output = self.image_backbone_output(batched_input)
 
