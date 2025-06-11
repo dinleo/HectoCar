@@ -21,7 +21,7 @@ solver.optimizer = L(torch.optim.AdamW)(
     weight_decay=0.05,
 )
 
-solver.criterion = L(HectoCriterion)()
+solver.criterion = L(HectoCriterionEmb)()
 
 solver.lr_scheduler = L(modified_coco_scheduler)(
     epochs=10,
