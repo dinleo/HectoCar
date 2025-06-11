@@ -149,7 +149,7 @@ class Hecto(nn.Module):
             mask = logit_b.max(dim=-1)[0] > self.threshold
 
             if mask.sum() == 0:
-                hs_sel = hs_b[0]
+                hs_sel = hs_b[0].unsqueeze(0)
             else:
                 hs_sel = hs_b[mask]        # (N, D)
                 logit_sel = logit_b[mask]  # (N, 128)
