@@ -26,17 +26,30 @@ class HectoCriterion(nn.Module):
 
 class HectoCriterionEmb(nn.Module):
     def __init__(self,
+                 class_weight=0.25,
                  mse_weight = 1.0,
                  align_weight = 0.25
                  ):
         super().__init__()
+        self.class_weight = class_weight
         self.mse_weight = mse_weight
         self.align_weight = align_weight
 
     def forward(self, outputs):
         total_loss = {}
-        query_pred = outputs['query_pred']  # [B, Q, D]
 
+        # Cross Entropy Loss
+        pred_logits = outputs['pred_logits']  # (B, C)
+        labels = [x['label'] for x in outputs['batched_input']]  # list of int
+        labels = torch.tensor(labels, dtype=torch.long, device=pred_logits.device)  # (B,)
+        log_probs = F.log_softmax(pred_logits, dim=-1)  # (B, C)
+        one_hot = torch.zeros_like(log_probs).scatter_(1, labels.unsqueeze(1), 1.0)  # (B, C)
+        ce_loss = -torch.sum(one_hot * log_probs, dim=1)  # (B,)
+        class_loss = ce_loss.mean()
+        total_loss['class_loss'] = class_loss * self.class_weight
+
+        # Embedding Loss
+        query_pred = outputs['query_pred']  # [B, Q, D]
         targets = outputs['targets']  # [B, D]
         query_target = targets['query_target']
         target_labels = targets['target_labels']

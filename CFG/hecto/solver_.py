@@ -3,7 +3,7 @@ from omegaconf import OmegaConf
 from detectron2.config import LazyCall as L
 from detectron2.solver.build import get_default_optimizer_params
 
-from solver.criterion.hecto_criterion import HectoCriterion
+from solver.criterion.hecto_criterion import *
 from solver.optimizer.scheduler import modified_coco_scheduler
 from solver.evaluator.coco_eval import CocoDefaultEvaluator
 import torch
@@ -21,7 +21,7 @@ solver.optimizer = L(torch.optim.AdamW)(
     weight_decay=0.05,
 )
 
-solver.criterion = L(HectoCriterion)()
+solver.criterion = L(HectoCriterionEmb)()
 
 solver.lr_scheduler = L(modified_coco_scheduler)(
     epochs=10,

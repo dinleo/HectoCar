@@ -81,6 +81,8 @@ class Hecto(nn.Module):
             nn.Linear(self.query_size, num_classes)
         )
 
+        self.embedding = nn.Linear(self.query_size, self.query_size)
+
         self.query_count = 0
         self.batch_count = 0
         self.freeze_backbone()
@@ -159,9 +161,10 @@ class Hecto(nn.Module):
         prompt_token = prompt_token.sum(dim=1) / mask_sum
 
         pred_logits = self.classifier(cls_token + prompt_token)  # (B, num_classes)
+        query_pred = self.embedding(cls_token + prompt_token)    # (B, D)
         return {
             "pred_logits": pred_logits,
-            "query_pred": cls_token,
+            "query_pred": query_pred,
             "batched_input": batched_input,
             "targets": targets,
         }
