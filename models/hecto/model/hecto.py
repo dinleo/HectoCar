@@ -18,8 +18,8 @@ class Hecto(nn.Module):
     def __init__(self,
                  detr_backbone,
                  region_size=256,
-                 image_size=1024,
-                 image_scale=3,
+                 image_size=256,
+                 image_scale=4,
                  query_size=768,
                  context_size=768,
                  num_query_token=16,
@@ -32,9 +32,9 @@ class Hecto(nn.Module):
         self.detr_backbone = detr_backbone
         self.detr_backbone.captions = "car . wheel . headlight . taillight . emblem . side mirror . window . grille . door . bumper . windshield . tire . roof . trunk ."
         self.caption_processor = CaptionProcessor(self.detr_backbone.tokenizer)
-        self.image_backbone_name = "microsoft/swin-base-patch4-window12-384-in22k"
-        self.image_backbone = SwinModel.from_pretrained(self.image_backbone_name).eval().to("cuda")
-        self.extractor = AutoFeatureExtractor.from_pretrained(self.image_backbone_name)
+        # self.image_backbone_name = "microsoft/swin-base-patch4-window12-384-in22k"
+        # self.image_backbone = SwinModel.from_pretrained(self.image_backbone_name).eval().to("cuda")
+        # self.extractor = AutoFeatureExtractor.from_pretrained(self.image_backbone_name)
 
         # target
         self.target_csv = "models/hecto/class_names.csv"
@@ -85,63 +85,19 @@ class Hecto(nn.Module):
 
         self.query_count = 0
         self.batch_count = 0
-        self.freeze_backbone()
+        # self.freeze_backbone()
 
     def forward(self, batched_input):
         # 1. Backbone
         self.detr_backbone.eval()
         detr_output = self.detr_backbone(batched_input)
-
-        pred_logits = detr_output["pred_logits"]             # (B, Q, 128)
-        pred_boxes = detr_output["pred_boxes"]               # (B, Q, 4)
-        hs = detr_output["hs"]                               # (B, Q, D)
         # visualize("model", detr_output, batched_input[0]["image"], caption=self.detr_backbone.captions)
 
-        # 2. Make Query Input
-        B, Q, D = hs.shape
-        query_list = []
-        for b in range(B):
-            logit_b = pred_logits[b].sigmoid()
-            boxes_b = pred_boxes[b]
-            hs_b = hs[b]
-            mask = logit_b.max(dim=-1)[0] > self.threshold
+        # 2. Get Query Input
+        query_tokens, valid_mask = self.get_query_from_detr(detr_output)
 
-            if mask.sum() == 0:
-                hs_sel = hs_b[0]
-            else:
-                hs_sel = hs_b[mask]        # (N, D)
-                logit_sel = logit_b[mask]  # (N, 128)
-                box_sel = boxes_b[mask]    # (N, 4)
-
-            prompt_query = self.query_proj(hs_sel)  # (N, hidden_dim)
-            cls_query = self.learnable_query
-            query_b = torch.cat([cls_query, prompt_query], dim=0)  # (1 + N, hidden_dim)
-            query_list.append(query_b)
-            self.batch_count += 1
-            self.query_count += len(query_b)
-
-        # Padding
-        max_len = max(q.shape[0] for q in query_list)
-        for i in range(B):
-            q = query_list[i]
-            pad_len = max_len - q.shape[0]
-            if pad_len > 0:
-                pad_q = torch.zeros(pad_len, self.query_size, device=q.device)
-                query_list[i] = torch.cat([q, pad_q], dim=0)
-
-        query_tokens = torch.stack(query_list, dim=0)  # (B, max_len, D)
-        valid_mask = (query_tokens.abs().sum(dim=-1) > 0).bool()   # (B, max_len)
-        query_tokens = self.query_norm(query_tokens)
-
-        # Make Context Input
-        ms_features = self.get_image_feature(batched_input)
-        ms_context_tokens = []
-        for s in range(len(ms_features)):
-            feat = ms_features[s]  # (B, D, H, W)
-            ctx = self.context_projection[s](feat)
-            ctx = ctx.flatten(2).transpose(1, 2).contiguous()  # (B, T, D)
-            ctx = self.context_tokens_ln[s](ctx)
-            ms_context_tokens.append(ctx)
+        # 3. Get Context Input
+        ms_context_tokens = self.get_ms_context_from_detr(detr_output["image_output"])
 
         # Encoder
         encoder_output = self.encoder(
@@ -179,7 +135,81 @@ class Hecto(nn.Module):
 
         return HectoEncoder(encoder_config)
 
-    def get_image_feature(self, batched_input):
+    def get_query_from_detr(self, detr_output):
+        pred_logits = detr_output["pred_logits"]             # (B, Q, 128)
+        pred_boxes = detr_output["pred_boxes"]               # (B, Q, 4)
+        hs = detr_output["hs"]                               # (B, Q, D)
+
+        B, Q, D = hs.shape
+        query_list = []
+        for b in range(B):
+            logit_b = pred_logits[b].sigmoid()
+            boxes_b = pred_boxes[b]
+            hs_b = hs[b]
+            mask = logit_b.max(dim=-1)[0] > self.threshold
+
+            if mask.sum() == 0:
+                hs_sel = hs_b[0]
+            else:
+                hs_sel = hs_b[mask]        # (N, D)
+                logit_sel = logit_b[mask]  # (N, 128)
+                box_sel = boxes_b[mask]    # (N, 4)
+
+            prompt_query = self.query_proj(hs_sel)  # (N, hidden_dim)
+            cls_query = self.query_proj(hs[:,0,:])
+            query_b = torch.cat([cls_query, prompt_query], dim=0)  # (1 + N, hidden_dim)
+            query_list.append(query_b)
+            self.batch_count += 1
+            self.query_count += len(query_b)
+
+        # Padding
+        max_len = max(q.shape[0] for q in query_list)
+        for i in range(B):
+            q = query_list[i]
+            pad_len = max_len - q.shape[0]
+            if pad_len > 0:
+                pad_q = torch.zeros(pad_len, self.query_size, device=q.device)
+                query_list[i] = torch.cat([q, pad_q], dim=0)
+
+        query_tokens = torch.stack(query_list, dim=0)  # (B, max_len, D)
+        valid_mask = (query_tokens.abs().sum(dim=-1) > 0).bool()   # (B, max_len)
+        query_tokens = self.query_norm(query_tokens)
+
+        return query_tokens, valid_mask
+
+    def get_ms_context_from_detr(self, image_output):
+        _, _, ms_pos, ms_features, ms_mask = image_output
+        ms_context_tokens = []
+        for s in range(len(ms_features)):
+            feat = ms_features[s]  # (B, C, H, W)
+            pos = ms_pos[s]  # (B, C, H, W)
+            mask = ms_mask[s]  # (B, H, W), True for pad
+
+            # 1. mask → float form (0 = keep, 1 = pad)
+            mask_f = mask.unsqueeze(1).float()  # (B, 1, H, W)
+
+            # 2. mask-out padded region
+            feat_with_pos = feat + pos
+            feat_with_pos = feat_with_pos.masked_fill(mask_f.bool(), 0.0)
+
+            # 3. projection
+            ctx = self.context_projection[s](feat_with_pos)  # (B, D, H, W)
+
+            # 4. pooling
+            pooled = F.adaptive_avg_pool2d(ctx, output_size=self.pool_sizes[s])  # (B, D, h, w)
+            mask_pooled = F.adaptive_avg_pool2d(1.0 - mask_f, output_size=self.pool_sizes[s])  # (B, 1, h, w)
+            mask_pooled = mask_pooled.clamp(min=1e-6)  # divide-by-zero
+
+            pooled = pooled / mask_pooled
+
+            # 6. flatten & LN
+            tokens = pooled.flatten(2).transpose(1, 2).contiguous()  # (B, T, D)
+            tokens = self.context_tokens_ln[s](tokens)
+            ms_context_tokens.append(tokens)
+
+        return ms_context_tokens
+
+    def get_ms_context_from_swin(self, batched_input):
         image_paths = [b["file_name"] for b in batched_input]
         images = [Image.open(p).convert("RGB") for p in image_paths]
         inputs = self.extractor(images=images, return_tensors="pt")
@@ -202,7 +232,15 @@ class Hecto(nn.Module):
 
             ms_features.append(pooled)  # shape: [B, D, H', W']
 
-        return ms_features
+        ms_context_tokens = []
+        for s in range(len(ms_features)):
+            feat = ms_features[s]  # (B, D, H, W)
+            ctx = self.context_projection[s](feat)
+            ctx = ctx.flatten(2).transpose(1, 2).contiguous()  # (B, T, D)
+            ctx = self.context_tokens_ln[s](ctx)
+            ms_context_tokens.append(ctx)
+
+        return ms_context_tokens
 
     def print_query_len(self):
         ave = self.query_count / self.batch_count

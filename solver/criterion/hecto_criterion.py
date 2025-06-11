@@ -26,7 +26,7 @@ class HectoCriterion(nn.Module):
 
 class HectoCriterionEmb(nn.Module):
     def __init__(self,
-                 class_weight=0.25,
+                 class_weight=1.0,
                  mse_weight = 1.0,
                  align_weight = 0.25
                  ):
