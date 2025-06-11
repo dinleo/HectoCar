@@ -12,7 +12,7 @@ eval_only = False
 project_name = "hecto" # Cur Subdir
 iter_per_epoch = 4000
 epoch = 5
-batch = 10
+batch = 5
 eval_sample = 100 # If set -1, evaluate all testdata
 
 
